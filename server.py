@@ -1,6 +1,5 @@
 from fastmcp import FastMCP
-from agents import Runner
-import asyncio
+from openai import OpenAI
 
 mcp = FastMCP(
     "Detector de Fraudes",
@@ -11,15 +10,8 @@ mcp = FastMCP(
 WORKFLOW_ID = "wf_6944dd03e65481908dfd92f9fc2ec522002546ac8361260f"
 
 
-async def chamar_agente_fraude(texto: str) -> dict:
-    """Chama o workflow de detecção de fraude na OpenAI."""
-    runner = Runner(workflow_id=WORKFLOW_ID)
-    result = await runner.run(input=texto)
-    return result
-
-
 @mcp.tool()
-async def analisar_fraude(texto: str) -> dict:
+def analisar_fraude(texto: str) -> dict:
     """Analisa mensagem ou print de WhatsApp para detectar fraudes e golpes.
 
     Use quando o usuario enviar um PRINT de WhatsApp, SMS ou email suspeito.
@@ -39,16 +31,33 @@ async def analisar_fraude(texto: str) -> dict:
         Analise completa com probabilidade de fraude, tipo de golpe e acoes recomendadas
     """
     try:
-        resultado = await chamar_agente_fraude(texto)
+        client = OpenAI()
+
+        # Criar sessão com o workflow
+        session = client.beta.chatkit.sessions.create(
+            user="mcp-user",
+            workflow={
+                "id": WORKFLOW_ID
+            }
+        )
+
+        # Enviar mensagem para o workflow
+        response = client.beta.chatkit.sessions.messages.create(
+            session_id=session.id,
+            role="user",
+            content=texto
+        )
+
         return {
             "status": "sucesso",
-            "analise": resultado
+            "session_id": session.id,
+            "analise": response
         }
     except Exception as e:
         return {
             "status": "erro",
             "mensagem": str(e),
-            "dica": "Verifique se a OPENAI_API_KEY esta configurada corretamente"
+            "dica": "Verifique se a OPENAI_API_KEY esta configurada"
         }
 
 
