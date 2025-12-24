@@ -1,7 +1,6 @@
 from fastmcp import FastMCP
-from openai import OpenAI
-import os
-import json
+from agents import Runner
+import asyncio
 
 mcp = FastMCP(
     "Detector de Fraudes",
@@ -10,35 +9,17 @@ mcp = FastMCP(
 
 # Configuração do workflow
 WORKFLOW_ID = "wf_6944dd03e65481908dfd92f9fc2ec522002546ac8361260f"
-WORKFLOW_VERSION = "4"
 
 
-def chamar_agente_fraude(texto: str) -> dict:
+async def chamar_agente_fraude(texto: str) -> dict:
     """Chama o workflow de detecção de fraude na OpenAI."""
-
-    client = OpenAI()
-
-    response = client.responses.create(
-        model="gpt-4o",
-        input=[
-            {
-                "role": "user",
-                "content": texto
-            }
-        ],
-        workflow={
-            "id": WORKFLOW_ID,
-            "version": WORKFLOW_VERSION
-        }
-    )
-
-    return response
+    runner = Runner(workflow_id=WORKFLOW_ID)
+    result = await runner.run(input=texto)
+    return result
 
 
 @mcp.tool()
-def analisar_fraude(
-    texto: str
-) -> dict:
+async def analisar_fraude(texto: str) -> dict:
     """Analisa mensagem ou print de WhatsApp para detectar fraudes e golpes.
 
     Use quando o usuario enviar um PRINT de WhatsApp, SMS ou email suspeito.
@@ -57,9 +38,8 @@ def analisar_fraude(
     Returns:
         Analise completa com probabilidade de fraude, tipo de golpe e acoes recomendadas
     """
-
     try:
-        resultado = chamar_agente_fraude(texto)
+        resultado = await chamar_agente_fraude(texto)
         return {
             "status": "sucesso",
             "analise": resultado
