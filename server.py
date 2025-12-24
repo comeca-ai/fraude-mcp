@@ -1,12 +1,13 @@
 from fastmcp import FastMCP
 from openai import OpenAI
+import time
 
 mcp = FastMCP(
     "Detector de Fraudes",
     instructions="Analisa prints de WhatsApp para detectar golpes. Use APENAS a ferramenta analisar_fraude."
 )
 
-WORKFLOW_ID = "wf_6944dd03e65481908dfd92f9fc2ec522002546ac8361260f"
+ASSISTANT_ID = "asst_JIzzruVEiqDG2U2edak3d2vE"
 
 
 @mcp.tool()
@@ -14,35 +15,54 @@ def analisar_fraude(texto: str) -> dict:
     """Analisa print de WhatsApp para detectar fraudes.
 
     Extraia o texto da imagem e passe para esta ferramenta.
-    Chama o workflow com 2 agentes: Triagem → Detector.
+    Chama o Agente de Fraude da OpenAI.
 
     Args:
         texto: Texto extraido do print
 
     Returns:
-        JSON com triagem e analise de fraude
+        Analise de fraude do agente
     """
     client = OpenAI()
 
-    # Criar sessão com o workflow
-    session = client.beta.chatkit.sessions.create(
-        user="mcp-user",
-        workflow={"id": WORKFLOW_ID}
+    # Criar thread
+    thread = client.beta.threads.create()
+
+    # Adicionar mensagem
+    client.beta.threads.messages.create(
+        thread_id=thread.id,
+        role="user",
+        content=texto
     )
 
-    # Enviar mensagem e aguardar resposta
-    response = client.beta.chatkit.sessions.turns.create(
-        session_id=session.id,
-        messages=[{"role": "user", "content": texto}]
+    # Executar assistant
+    run = client.beta.threads.runs.create(
+        thread_id=thread.id,
+        assistant_id=ASSISTANT_ID
     )
 
-    # Extrair output
-    output = ""
-    for item in response.items:
-        if hasattr(item, 'content'):
-            output = item.content
+    # Aguardar conclusão
+    while run.status in ["queued", "in_progress"]:
+        time.sleep(1)
+        run = client.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id
+        )
+
+    # Pegar resposta
+    messages = client.beta.threads.messages.list(thread_id=thread.id)
+
+    # Extrair última resposta do assistant
+    for msg in messages.data:
+        if msg.role == "assistant":
+            content = msg.content[0].text.value if msg.content else ""
+            return {
+                "status": "sucesso",
+                "thread_id": thread.id,
+                "analise": content
+            }
 
     return {
-        "session_id": session.id,
-        "resultado": output
+        "status": "erro",
+        "mensagem": "Sem resposta do assistant"
     }
