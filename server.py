@@ -1,57 +1,166 @@
 from fastmcp import FastMCP
-from openai import OpenAI
+from agents import Agent, Runner
 
 mcp = FastMCP(
     "Detector de Fraudes",
-    instructions="Analisa prints de WhatsApp e mensagens para detectar golpes e fraudes usando IA avançada."
+    instructions="Analisa prints de WhatsApp e mensagens para detectar golpes e fraudes."
 )
 
-# Configuração do workflow
-WORKFLOW_ID = "wf_6944dd03e65481908dfd92f9fc2ec522002546ac8361260f"
+agente_triagem = Agent(
+    name="Agente triagem",
+    instructions="""# AGENTE DE TRIAGEM
+
+Extraia dados de conversas suspeitas em JSON. Anonimize dados sensíveis.
+
+## Anonimização
+- Telefones → [TELEFONE_REMETENTE]
+- Nomes → [NOME_TITULAR]
+- CPF → [CPF_OCULTADO]
+- Conta → formato XXXXX-X
+- Agência → formato XXXX
+
+## Extrair
+
+1. **Metadados**: horário, bateria, operadora, conexão
+2. **Remetente**: tipo (salvo/desconhecido), DDD, região
+3. **Interações**: ligações perdidas, horários
+4. **Mensagens**: autor, texto, horário, sequência
+5. **Dados financeiros**: banco, titular, agência, conta, PIX, valor
+6. **Links**: domínios, encurtadores, suspeitos
+7. **Padrões**: insistência, urgência, mudança de assunto
+8. **Contexto**: app, tema, tom emocional
+
+## Saída JSON
+```json
+{
+  "metadados_dispositivo": {},
+  "remetente": {},
+  "historico_interacoes": {},
+  "mensagens": [],
+  "dados_financeiros": {},
+  "links": {},
+  "padroes_comportamento": {},
+  "contexto": {}
+}
+```
+
+## Regras
+- Dados reais → tokens anonimizados
+- Extraia só o visível
+- Capture padrões suspeitos""",
+    model="gpt-4.1"
+)
+
+agente_fraude = Agent(
+    name="Agente de fraude",
+    instructions="""# AGENTE DETECTOR DE FRAUDE
+
+Analise dados anonimizados e determine probabilidade de golpe.
+
+## Critérios e Pesos
+
+### Comportamento (alto impacto)
+- Ligação perdida → dados bancários: 35%
+- Conta de terceiro: 30%
+- Número desconhecido + pagamento: 30%
+- Insistência/mensagens seguidas: 25%
+- Mudança abrupta para dinheiro: 20%
+
+### Dados Financeiros
+- PIX/transferência solicitada: 35%
+- Titular ≠ contexto: 30%
+- Valor + urgência: 25%
+
+### Links
+- Domínio falso (.click, .tk): 35%
+- Encurtador sem contexto: 25%
+
+### Comunicação
+- Ameaça de bloqueio: 25%
+- Urgência explícita: 20%
+- Finge ser banco/parente: 25%
+
+## Tipos de Golpe
+1. Falso parente ("mudei de número")
+2. Falso banco ("compra suspeita")
+3. Falso Correios ("taxa de liberação")
+4. Clonagem WhatsApp (pede código)
+5. PIX errado ("devolve")
+6. Falso sequestro
+
+## Níveis
+| Prob | Nível | Ação |
+|------|-------|------|
+| 0-20% | 🟢 BAIXO | Confirme por outro canal |
+| 21-50% | 🟡 MÉDIO | NÃO clique, verifique |
+| 51-100% | 🔴 ALTO | GOLPE - Bloqueie |
+
+## Saída JSON
+```json
+{
+  "probabilidade": 90,
+  "nivel_risco": "ALTO",
+  "criterios_detectados": [
+    {"criterio": "...", "peso": 35, "evidencia": "..."}
+  ],
+  "tipo_golpe_identificado": "Falso parente",
+  "red_flags": ["..."],
+  "recomendacao_principal": "NÃO TRANSFIRA",
+  "acoes_imediatas": ["Bloqueie", "Denuncie"],
+  "se_ja_transferiu": ["Ligue pro banco", "Faça B.O."]
+}
+```
+
+## Regras
+- Na dúvida, aumente a probabilidade
+- Explique cada critério com evidência
+- Ações práticas e específicas
+- Orientações para quem já caiu""",
+    model="gpt-4.1"
+)
 
 
 @mcp.tool()
-def analisar_fraude(texto: str) -> dict:
-    """Analisa mensagem ou print de WhatsApp para detectar fraudes e golpes.
+async def analisar_fraude(texto: str) -> dict:
+    """Analisa mensagem ou print de WhatsApp para detectar fraudes.
 
     Use quando o usuario enviar um PRINT de WhatsApp, SMS ou email suspeito.
     Extraia o texto completo da imagem e passe para esta ferramenta.
 
-    O agente de IA vai:
-    1. Extrair dados estruturados (remetente, mensagens, dados bancarios)
-    2. Identificar padroes de comportamento suspeito
-    3. Calcular probabilidade de fraude
-    4. Identificar o tipo de golpe
-    5. Dar recomendacoes de seguranca
+    Executa 2 agentes em sequência:
+    1. Triagem: extrai e anonimiza dados
+    2. Detector: analisa e calcula probabilidade de fraude
 
     Args:
         texto: Texto extraido da mensagem/print do WhatsApp
 
     Returns:
-        Analise completa com probabilidade de fraude, tipo de golpe e acoes recomendadas
+        Analise completa com probabilidade, tipo de golpe e acoes recomendadas
     """
     try:
-        client = OpenAI()
+        runner = Runner()
 
-        # Criar sessão com o workflow
-        session = client.beta.chatkit.sessions.create(
-            user="mcp-user",
-            workflow={
-                "id": WORKFLOW_ID
-            }
+        # Agente 1: Triagem
+        resultado_triagem = await runner.run(
+            agente_triagem,
+            [{"role": "user", "content": texto}]
         )
 
-        # Enviar mensagem para o workflow
-        response = client.beta.chatkit.sessions.messages.create(
-            session_id=session.id,
-            role="user",
-            content=texto
+        # Agente 2: Fraude (recebe histórico com resultado da triagem)
+        historico = [
+            {"role": "user", "content": texto},
+            {"role": "assistant", "content": resultado_triagem.final_output}
+        ]
+
+        resultado_fraude = await runner.run(
+            agente_fraude,
+            historico
         )
 
         return {
             "status": "sucesso",
-            "session_id": session.id,
-            "analise": response
+            "triagem": resultado_triagem.final_output,
+            "analise": resultado_fraude.final_output
         }
     except Exception as e:
         return {
@@ -63,51 +172,33 @@ def analisar_fraude(texto: str) -> dict:
 
 @mcp.tool()
 def dicas_antifraude() -> dict:
-    """Retorna dicas para se proteger de golpes e fraudes.
-
-    Use quando o usuario pedir orientacoes gerais sobre seguranca."""
+    """Retorna dicas para se proteger de golpes e fraudes."""
 
     return {
-        "golpes_mais_comuns": [
-            {
-                "nome": "Golpe do Falso Parente",
-                "como_funciona": "Golpista usa numero novo fingindo ser familiar pedindo dinheiro urgente",
-                "como_evitar": "SEMPRE ligue para o numero antigo do familiar para confirmar"
-            },
-            {
-                "nome": "Golpe do Falso Funcionario",
-                "como_funciona": "Ligam dizendo ser do banco pedindo dados ou transferencia",
-                "como_evitar": "Bancos NUNCA ligam pedindo senha ou dados. Desligue e ligue para o numero oficial."
-            },
-            {
-                "nome": "Golpe do PIX",
-                "como_funciona": "Pedem PIX urgente para 'corrigir erro' ou conta de terceiro",
-                "como_evitar": "Desconfie de contas com titulares diferentes do esperado"
-            },
-            {
-                "nome": "Phishing",
-                "como_funciona": "Emails/SMS falsos com links para roubar dados",
-                "como_evitar": "Nunca clique em links. Acesse o site digitando o endereco oficial."
-            }
+        "tipos_de_golpe": [
+            {"nome": "Falso parente", "sinal": "Oi, mudei de número"},
+            {"nome": "Falso banco", "sinal": "Detectamos compra suspeita"},
+            {"nome": "Falso Correios", "sinal": "Taxa de liberação"},
+            {"nome": "Clonagem WhatsApp", "sinal": "Pede código SMS"},
+            {"nome": "PIX errado", "sinal": "Mandei errado, devolve"},
+            {"nome": "Falso sequestro", "sinal": "Pressão extrema, choro"}
         ],
         "red_flags": [
-            "Numero desconhecido pedindo transferencia",
-            "Conta bancaria com nome de terceiro",
-            "Urgencia excessiva ('preciso agora', 'so ate hoje')",
-            "Ligacao perdida seguida de dados bancarios",
-            "Pedido de senha, CVV, token ou codigo SMS"
+            "Número desconhecido pedindo dinheiro",
+            "Conta bancária com nome de terceiro",
+            "Urgência excessiva",
+            "Pedido de senha, CVV ou código"
         ],
         "regras_de_ouro": [
-            "Bancos NUNCA pedem senha por telefone/mensagem",
-            "Desconfie de URGENCIA - golpistas criam pressao",
-            "Na duvida, DESLIGUE e ligue para o numero oficial",
-            "NUNCA clique em links de mensagens",
-            "Confirme por LIGACAO (numero antigo) antes de transferir"
+            "Bancos NUNCA pedem senha por telefone",
+            "Desconfie de URGÊNCIA",
+            "Confirme por LIGAÇÃO no número antigo",
+            "NUNCA clique em links de mensagens"
         ],
         "se_cair_em_golpe": [
-            "Ligue IMEDIATAMENTE para o banco e peca bloqueio",
-            "Solicite estorno via MED (Mecanismo Especial de Devolucao)",
-            "Faca Boletim de Ocorrencia",
-            "Guarde todos os prints e evidencias"
+            "Ligue pro banco IMEDIATAMENTE",
+            "Peça bloqueio via MED",
+            "Faça B.O. online",
+            "Guarde prints"
         ]
     }
